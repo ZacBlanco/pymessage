@@ -213,9 +213,15 @@ class TestUDPCommunicator(unittest.TestCase):
 
         # Give some time for the other thread to run before checking conditions
         ctr = 0
-        while mock1.called != True and comm1._receive.called != True and ctr < 20:
+        while mock1.called != True and ctr < 20:
             time.sleep(0.1)
             ctr += 1
+
+        ctr = 0
+        while comm1._receive.called != True and ctr < 20:
+            time.sleep(0.1)
+            ctr += 1
+
 
         mock1.assert_called_with(2048)
         comm1.close()
