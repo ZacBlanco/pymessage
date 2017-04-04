@@ -97,7 +97,7 @@ class TestUDPCommunicator(unittest.TestCase):
             l.append(i)
         comm1 = UDPCommunicator(9090)
         l = str(l).encode('utf-8')
-        p1 = comm1.create_packets(l, '9012'.encode('utf-8'))
+        p1 = comm.create_packets(l, '9012'.encode('utf-8'))
         self.assertEqual(len(p1), 1)
         p1 = p1[0]
         comm1.close()
@@ -108,7 +108,7 @@ class TestUDPCommunicator(unittest.TestCase):
         for i in range(1000):
             d.append(random.random())
         d = str(d).encode('utf-8')
-        packs = comm1.create_packets(d, 'tag1'.encode('utf-8'))
+        packs = comm.create_packets(d, 'tag1'.encode('utf-8'))
         r = bytes() # total data bytes
         t = bytes()
         for packet in packs:
@@ -130,7 +130,7 @@ class TestUDPCommunicator(unittest.TestCase):
         for i in range(122): # Exactly 500 bytes
             d.append(i)
         d = str(d).encode('utf-8')
-        d = comm1.create_packets(d, '1111'.encode('utf-8'))
+        d = comm.create_packets(d, '1111'.encode('utf-8'))
         self.assertEqual(len(d), 1, 'Should have only created a single packet')
         self.assertEqual('1111'.encode('utf-8'), d[0][4:8])
         self.assertEqual(0, struct.unpack('H', d[0][0:2])[0])
@@ -166,8 +166,8 @@ class TestUDPCommunicator(unittest.TestCase):
         '''Encodes and decodes a single packet.'''
         comm1 = UDPCommunicator(10001)
         l = str(list(range(100))).encode('utf-8')
-        for packet in comm1.create_packets(l, '_get'.encode('utf-8')):
-            comm1.receive(packet, 'test')
+        for packet in comm.create_packets(l, '_get'.encode('utf-8')):
+            comm1._receive(packet, 'test')
         r = comm1.get('test', '_get'.encode('utf-8'))
         self.assertNotEqual(r, None)
         self.assertEqual(l, r, 'Reassembled bytes should be the same.')
@@ -178,7 +178,7 @@ class TestUDPCommunicator(unittest.TestCase):
         when creating packets'''
         comm1 = UDPCommunicator(10001)
         l = str(list(range(550))).encode('utf-8')
-        packets = comm1.create_packets(l, '_get'.encode('utf-8'))
+        packets = comm.create_packets(l, '_get'.encode('utf-8'))
         self.assertEqual(len(packets), 6)
 
         comm1.close()
@@ -188,9 +188,9 @@ class TestUDPCommunicator(unittest.TestCase):
         reassembled corectly.'''
         comm1 = UDPCommunicator(10001)
         l = str(list(range(1000))).encode('utf-8')
-        packets = comm1.create_packets(l, '_get'.encode('utf-8'))
+        packets = comm.create_packets(l, '_get'.encode('utf-8'))
         for packet in packets:
-            comm1.receive(packet, 'test')
+            comm1._receive(packet, 'test')
         r = comm1.get('test', '_get'.encode('utf-8'))
         self.assertNotEqual(r, None)
         self.assertEqual(l, r, 'Reassembled bytes should be the same.')
@@ -208,17 +208,18 @@ class TestUDPCommunicator(unittest.TestCase):
         comm1.listen()
         self.assertNotEqual(comm1.listen_thread, None)
         self.assertEqual(comm1.is_listening, True)
-        comm1.receive = MagicMock()
+        comm1._receive = MagicMock()
         comm1.send('127.0.0.1', l, 'test'.encode('utf-8'))
 
         # Give some time for the other thread to run before checking conditions
         ctr = 0
-        while mock1.called != True and comm1.receive.called != True and ctr < 20:
+        while mock1.called != True and comm1._receive.called != True and ctr < 20:
             time.sleep(0.1)
+            ctr += 1
 
         mock1.assert_called_with(2048)
         comm1.close()
-        comm1.receive.assert_called_with(d, '127.0.0.1')
+        comm1._receive.assert_called_with(d, '127.0.0.1')
 
     def test_same_tag_send(self):
 
@@ -226,9 +227,9 @@ class TestUDPCommunicator(unittest.TestCase):
         comm1 = UDPCommunicator(9071)
         for i in range(10):
             msg = 'Iteration: {}'.format(i).encode('utf-8')
-            packets = comm1.create_packets(msg, 'test'.encode('utf-8'))
+            packets = comm.create_packets(msg, 'test'.encode('utf-8'))
             for packet in packets:
-                comm1.receive(packet, 'local')
+                comm1._receive(packet, 'local')
             self.assertEqual(comm1.get('local', 'test'.encode('utf-8')).decode('utf-8'),
                              msg.decode('utf-8'))
 
@@ -238,9 +239,9 @@ class TestUDPCommunicator(unittest.TestCase):
 
         comm1 = UDPCommunicator(9071)
         s = bytes(str(range(1000)).encode('utf-8'))
-        pkts = comm1.create_packets(s, 'tg11'.encode('utf-8'))
+        pkts = comm.create_packets(s, 'tg11'.encode('utf-8'))
         for pkt in pkts:
-            comm1.receive(pkt, 'local')
+            comm1._receive(pkt, 'local')
         s2 = comm1.get('local', 'tg11'.encode('utf-8'))
         self.assertEqual(s, s2, "Bytes should be able to be retrieved")
         s2 = comm1.get('local', 'tg11'.encode('utf-8'))
@@ -348,15 +349,15 @@ class TCPCommTest(unittest.TestCase):
         self.comm1 = TCPCommunicator(8998)
         self.comm1.connections['127.0.0.1'] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.comm1.is_listening = True
-        self.comm1.receive_tcp = MagicMock()
-        self.comm1.receive_tcp.return_value = -1
+        self.comm1._receive = MagicMock()
+        self.comm1._receive.return_value = -1
         thd = threading.Thread(target=self.comm1._run_connect,
                                args=(self.comm1.connections['127.0.0.1'], '127.0.0.1'))
         thd.start()
         time.sleep(0.1)
         self.comm1.is_listening = False
         thd.join()
-        self.assertTrue(self.comm1.receive_tcp.called)
+        self.assertTrue(self.comm1._receive.called)
         self.assertTrue(mock_recv.called)
         self.assertTrue('127.0.0.1' not in self.comm1.connections)
         self.comm1.close()
@@ -367,7 +368,7 @@ class TCPCommTest(unittest.TestCase):
         tag = 'abcd'.encode('utf-8')[0:4]
         data = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.encode('utf-8')
         pkt = tag + data
-        self.comm1.receive_tcp(pkt, '127.0.0.1')
+        self.comm1._receive(pkt, '127.0.0.1')
         self.assertEqual(self.comm1.get('127.0.0.1', tag), data)
         self.comm1.close()
 

@@ -20,127 +20,6 @@ TCP = 20
 socket.setdefaulttimeout(1.5)
 logger = logging.getLogger(__name__)
 
-
-def get_mtu():
-    '''Attempts to return the MTU for the network by finding the min of the
-    first hop MTU and 576 bytes. i.e min(MTU_fh, 576)
-
-    Note that the 576 byte sized MTU does not account for the checksum/ip headers so
-    when sending data we need to take the IP/protocol headers into account.
-
-    The current implementation just assumes the default minimum of 576.
-    We should try to implement something to actually calculate min(MTU_fh, 576)
-
-    Returns:
-        int: 576
-    '''
-    return 576
-
-
-def check_port(port):
-    '''Checks if a port is valid.
-
-    A port is restricted to be a 16 bit integer which is in the range 0 < port < 65535.
-    Typically most applications will use ports > ~5000
-
-    Args:
-        port (int): The port number. ValueError raised if it is not an int.
-
-    Returns:
-        int: returns the port number if valid, otherwise an error is raised
-
-    '''
-    if isinstance(port, int) is not True:  # Ensure we're dealing with real ports
-        raise TypeError("port must be an integer")
-    elif port < 0 or port > 65535:
-        raise ValueError("port must be between 0 and 65535")
-    else:
-        return port
-
-
-def get_payload(payload):
-    '''Take data payload and return a byte array of the object. Should be
-    structured as a dict/list object. Note this method is slightly expensive
-    because it encodes a dictionary as a JSON string in order to get the bytes
-
-    We also set the separators to exclude spaces in the interest of saving
-     data due to spaces being unnecessary. This is a primitive way to convert
-    data into bytes and you can load it.
-
-    Args:
-        payload(obj): A JSON serializable object representing the payload data
-
-    Returns:
-        bytes: The object as a utf-8 encoded string
-    '''
-    data = json.dumps(payload, separators=[':', ',']).encode('utf-8')
-    return data
-
-
-def decode_payload(payload):
-    '''Takes a byte array and converts it into an object using ``json.loads``
-
-    Args:
-        payload (bytearray): An array of bytes to decode and convert into an object.
-
-    Returns:
-        dict/list: A dictionary or list object depending on the JSON that was encoded
-    '''
-
-    data = json.loads(payload.decode('utf-8'), separator=([':', ',']))
-    return data
-
-
-def build_meta_packet(seq_num, seq_total, tag):
-    '''Create a bytearray which returns a sequence of bytes based on the metadata
-
-    Args:
-        seq_num(int): The packet's sequence number
-        seq_total(int): The total number of sequence packets to be sent
-        tag (bytes): A string or bytes object to encode as the data tag
-
-    Returns:
-        bytearray: A bytearray with the metadata
-    '''
-    if isinstance(seq_total, int) is False or isinstance(seq_num, int) is False:
-        raise TypeError("Sequence number and total must be integer")
-    packet = bytearray()
-    packet += struct.pack('H', seq_total)
-    packet += struct.pack('H', seq_num)
-    packet += tag[0:4]
-    return packet
-
-def recv_n_bytes(conn, num):
-    '''Get a set number of bytes from a TCP connection
-
-    Args:
-        conn (socket): A connected TCP socket
-        num (int): Number of bytes to read
-
-    Returns:
-        bytes: a bytes object containing the data read. None if num < 0
-    '''
-    if num < 0:
-        raise ValueError("conn {} request {} bytes. Bytes must be > 0".format(conn, num))
-    bytes_left = num
-    msg_b = b''
-    while len(msg_b) < num:
-        try:
-            bts = conn.recv(bytes_left)
-            if len(bts) == 0:
-                return None
-                # break  # Empty str means closed socket
-            msg_b += bts
-            bytes_left -= len(bts)
-        except socket.timeout as err:
-            # Socket timed out waiting for bytes
-            pass
-        except OSError as err:
-            # Socket timed out - log an error eventually
-            logger.info('recv_n_bytes: %s', str(err))
-            return None
-    return msg_b
-
 class BaseCommunicator(object):
     '''Communicators send and receive data with a specific "tag" and store it until a user
     retrieves it.
@@ -169,11 +48,16 @@ class BaseCommunicator(object):
         '''Sends a message of bytes to addr with a tag identifier'''
         raise NotImplementedError("Can't use base communicator object. Use UDP or TCP")
 
-    def listen(self):
-        '''Listen for incoming messages or connection requests'''
+    def listen(self, addr='0.0.0.0'):
+        '''Listen for incoming messages or connection requests
+
+            Args:
+                addr (str): The IP address to listen for requests on. Default is '0.0.0.0'
+
+        '''
         raise NotImplementedError("Can't use BaseCommunicator. Use UDP or TCP.")
 
-    def receive(self):
+    def _receive(self, data, addr):
         '''Take a piece of data which was received and process it into a message'''
         raise NotImplementedError()
 
@@ -321,7 +205,7 @@ class TCPCommunicator(BaseCommunicator):
         Args:
             addrs (str): IPv4 Address to send to
             data (bytes): Data to send
-            tag (bytes): Message identifier. Will take up to first 4 bytes
+            tag (bytes): Message identifier. Will take up to first TAG_SIZE bytes
 
         '''
         # Create the packet with tag at the top
@@ -351,17 +235,20 @@ class TCPCommunicator(BaseCommunicator):
             logger.error(exception)
             raise RuntimeError(exception)
 
-    def listen(self):
+    def listen(self, addr='0.0.0.0'):
         '''Start listening on port ``self.port``. Creates a new thread where the socket will
-        listen for incoming data
+        listen for incoming connections
+
+        Args:
+            addr (str): The address to accept new connections on
         '''
         if self.is_listening is True:
-            raise RuntimeError('Cannot listen. Socket already listening.')
+            raise RuntimeError('Cannot listen again. Socket already listening.')
 
         if self.listen_thread is None:  # Create thread if not already created
             self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listen_thread = threading.Thread(target=self._run_tcp,
-                                                  args=(self.listen_sock, '0.0.0.0',
+                                                  args=(self.listen_sock, addr,
                                                         self.port))
 
             self.is_listening = True
@@ -437,7 +324,7 @@ class TCPCommunicator(BaseCommunicator):
         while self.is_listening:
             with self.conn_lock:
                 if addr not in self.connections:
-                    logger.warning("Run TCP on connection not in dict {}".format(addr))
+                    logger.warning("Run TCP on connection not in dict %s", addr)
                     connection.close()
                     return
             try:
@@ -452,7 +339,7 @@ class TCPCommunicator(BaseCommunicator):
                     break
                 msg_data = recv_n_bytes(connection, m_len)
                 if msg_data is not None:
-                    self.receive_tcp(msg_data, addr)
+                    self._receive(msg_data, addr)
                 else:
                     logger.warning("msgdata is None")
                     break # Close connection if returned None
@@ -473,8 +360,8 @@ class TCPCommunicator(BaseCommunicator):
             logger.debug('_run_connect, error closing TCP socket: %s', err)
         return
 
-    def receive_tcp(self, data, addr):
-        '''Stores the TCP data reveived into the data store
+    def _receive(self, data, addr):
+        '''Stores the packet data received into the data store
 
         Args:
             data (bytes) : The data to store.
@@ -518,11 +405,10 @@ class UDPCommunicator(BaseCommunicator):
      use ``send()`` in order to send it to the listening host.
      The methods here will take care of packet fragmenting and
      makes sure messages are reassembled correctly. You
-     must also add a 'tag' to the data. It should be a 4-byte
-     long identifier. For strings this is limited to 4 characters.
-      Anything longer than 4 is truncated
+     must also add a 'tag' to the data. It should be a TAG_SIZE-byte
+     long identifier.
 
-      - ``comm.send('IP_ADDRESS', my_bytes, 'tag1')``
+      - ``comm.send('IP_ADDRESS', my_bytes, 'tag1'.encode('utf-8'))``
 
 
     3. After sending, there's nothing else for the client to do'
@@ -595,7 +481,7 @@ class UDPCommunicator(BaseCommunicator):
         self.send_sock = None
         self.listen_sock = None
 
-    def listen(self):
+    def listen(self, addr='0.0.0.0'):
         '''Start listening on port ``self.port``. Creates a new thread where the socket will
         listen for incoming data
 
@@ -612,7 +498,7 @@ class UDPCommunicator(BaseCommunicator):
             # should investigate the performance impact of this)
             self.listen_sock.setblocking(False)
             self.listen_thread = threading.Thread(target=self._run_listen,
-                                                  args=(self.listen_sock, '0.0.0.0',
+                                                  args=(self.listen_sock, addr,
                                                         self.port))
 
             self.is_listening = True
@@ -646,81 +532,11 @@ class UDPCommunicator(BaseCommunicator):
             try:
                 data, addr = _sock.recvfrom(2048)  # Receive at max 2048 bytes
                 # logger.debug('Received data from address {}'.format(addr))
-                self.receive(data, addr[0])
+                self._receive(data, addr[0])
             except BlockingIOError:
                 pass
 
         _sock.close()
-
-    def create_packets(self, data, tag):
-        '''Segments a chunk of data (payload) into separate packets in order to send in sequence to
-        the desired address.
-
-        The messages sent using this class are simple byte arrays, which include metadata, so in
-        order to segment into the correct number of packets we also need to calculate the size of
-        the packet overhead (metadata) as well as subtract the IP headers in order to find the
-        maximal amount of payload data we can send in a single packet.
-
-        We need to use the MTU in this case which we'll take as typically a minimum of 576 bytes.
-        According to RFC 791 the maximum IP header size is 60 bytes (typically 20), and according
-        to RFC 768, the UDP header size is 8 bytes. This leaves the bare minimum payload size to be
-        508 bytes. (576 - 60 - 8).
-
-        We will structure packets as such (not including UDP/IP headers)
-
-        +---------------------+--------------------+----------------------+
-        | Seq.Total (2 bytes) | Seq. Num (2 bytes) | Tag (TAG_SIZE bytes) |
-        +---------------------+--------------------+----------------------+
-        |                            Data (500 Bytes)                     |
-        +-----------------------------------------------------------------+
-
-        A limitation is that we can only sequence a total of 2^16 packets which, given a max data
-        size of 500 bytes gives us a maximum data transmission of (2^16)*500 ~= 33MB for a single
-        request.
-
-        Also note that the Seq Num. is zero-indexed so that the maximum sequence number (and the
-        sequence total) will go up to ``len(packets) - 1``. Or in other words, 1 less than the
-        number of packets.
-
-        Args:
-            data (bytes): The data as a string which is meant to be sent to its destination
-            tag (bytes): A tag. Only the first 4 bytes are added as the tag.
-
-        Returns
-            list: A list containing the payload for the packets which should be sent to the
-            destination.
-        '''
-        packets = []
-        max_payload = get_mtu() - 68  # conservative estimate to prevent IP fragmenting on UDP
-        metadata_size = 8  # 8 bytes
-        data_size = len(data)
-        max_data = max_payload - metadata_size
-
-        # TWO CASES
-        # - We can send everything in 1 packet
-        # - We must break into multiple packets which will require sequencing
-        if data_size <= max_data:
-            # Assemble the packet, no sequencing
-            payload = build_meta_packet(0, 0, tag)
-            payload += data
-            packets.append(payload)
-        else:
-            total_packets = math.floor(data_size / max_payload)
-            for i in range(total_packets):  # [0, total_packets-1]
-                pkt1 = build_meta_packet(i, total_packets, tag)
-
-                # Slice data into ~500 byte packs
-                dat1 = data[i * max_data:(i + 1) * max_data]
-                pkt1 += dat1
-                packets.append(pkt1)
-            # Build the  final packet
-            pkt1 = build_meta_packet(total_packets, total_packets, tag)
-            min_bound = (total_packets) * max_data
-            dat1 = data[min_bound:]
-            pkt1 += dat1
-            packets.append(pkt1)
-
-        return packets
 
     def send(self, ip_addr, data, tag):
         '''Send a chunk of data with a specific tag to an ip address. The packet will be
@@ -739,7 +555,7 @@ class UDPCommunicator(BaseCommunicator):
         # As simple as just creating the packets and sending each one
         # individually
         ret = True
-        packets = self.create_packets(data, tag)
+        packets = create_packets(data, tag)
         # logger.debug("Sending {} packet(s) to {}".format(len(packets), ip))
         for packet in packets:
             # logger.debug('Sending packet to IP: {} on port {}'.format(ip, self.send_port))
@@ -754,7 +570,7 @@ class UDPCommunicator(BaseCommunicator):
                 break
         return ret
 
-    def receive(self, data, addr):
+    def _receive(self, data, addr):
         '''Take a piece of data received over the socket and processes the data and attempt to
         combine packet sequences together, passing them to the data store when ready.
 
@@ -833,3 +649,192 @@ class UDPCommunicator(BaseCommunicator):
                 self.recv_callback(addr, data_tag, reassembled)
             self.tmp_data[addr][data_tag]['packets'] = {}
             self.tmp_data[addr][data_tag]['seq_total'] = {}
+
+def get_mtu():
+    '''Attempts to return the MTU for the network by finding the min of the
+    first hop MTU and 576 bytes. i.e min(MTU_fh, 576)
+
+    Note that the 576 byte sized MTU does not account for the checksum/ip headers so
+    when sending data we need to take the IP/protocol headers into account.
+
+    The current implementation just assumes the default minimum of 576.
+    We should try to implement something to actually calculate min(MTU_fh, 576)
+
+    Returns:
+        int: 576
+    '''
+    return 576
+
+
+def check_port(port):
+    '''Checks if a port is valid.
+
+    A port is restricted to be a 16 bit integer which is in the range 0 < port < 65535.
+    Typically most applications will use ports > ~5000
+
+    Args:
+        port (int): The port number. ValueError raised if it is not an int.
+
+    Returns:
+        int: returns the port number if valid, otherwise an error is raised
+
+    '''
+    if isinstance(port, int) is not True:  # Ensure we're dealing with real ports
+        raise TypeError("port must be an integer")
+    elif port < 0 or port > 65535:
+        raise ValueError("port must be between 0 and 65535")
+    else:
+        return port
+
+def create_packets(data, tag):
+    '''Segments a chunk of data (payload) into separate packets in order to send in sequence to
+    the desired address.
+
+    The messages sent using this class are simple byte arrays, which include metadata, so in
+    order to segment into the correct number of packets we also need to calculate the size of
+    the packet overhead (metadata) as well as subtract the IP headers in order to find the
+    maximal amount of payload data we can send in a single packet.
+
+    We need to use the MTU in this case which we'll take as typically a minimum of 576 bytes.
+    According to RFC 791 the maximum IP header size is 60 bytes (typically 20), and according
+    to RFC 768, the UDP header size is 8 bytes. This leaves the bare minimum payload size to be
+    508 bytes. (576 - 60 - 8).
+
+    We will structure packets as such (not including UDP/IP headers)
+
+    +---------------------+--------------------+----------------------+
+    | Seq.Total (2 bytes) | Seq. Num (2 bytes) | Tag (TAG_SIZE bytes) |
+    +---------------------+--------------------+----------------------+
+    |                            Data (500 Bytes)                     |
+    +-----------------------------------------------------------------+
+
+    A limitation is that we can only sequence a total of 2^16 packets which, given a max data
+    size of 500 bytes gives us a maximum data transmission of (2^16)*500 ~= 33MB for a single
+    request.
+
+    Also note that the Seq Num. is zero-indexed so that the maximum sequence number (and the
+    sequence total) will go up to ``len(packets) - 1``. Or in other words, 1 less than the
+    number of packets.
+
+    Args:
+        data (bytes): The data as a string which is meant to be sent to its destination
+        tag (bytes): A tag. Only the first TAG_SIZE bytes are added as the tag.
+
+    Returns
+        list: A list containing the payload for the packets which should be sent to the
+        destination.
+    '''
+    packets = []
+    max_payload = get_mtu() - 68  # conservative estimate to prevent IP fragmenting on UDP
+    metadata_size = 8  # 8 bytes
+    data_size = len(data)
+    max_data = max_payload - metadata_size
+
+    # TWO CASES
+    # - We can send everything in 1 packet
+    # - We must break into multiple packets which will require sequencing
+    if data_size <= max_data:
+        # Assemble the packet, no sequencing
+        payload = build_meta_packet(0, 0, tag)
+        payload += data
+        packets.append(payload)
+    else:
+        total_packets = math.floor(data_size / max_payload)
+        for i in range(total_packets):  # [0, total_packets-1]
+            pkt1 = build_meta_packet(i, total_packets, tag)
+
+            # Slice data into ~500 byte packs
+            dat1 = data[i * max_data:(i + 1) * max_data]
+            pkt1 += dat1
+            packets.append(pkt1)
+        # Build the  final packet
+        pkt1 = build_meta_packet(total_packets, total_packets, tag)
+        min_bound = (total_packets) * max_data
+        dat1 = data[min_bound:]
+        pkt1 += dat1
+        packets.append(pkt1)
+
+    return packets
+
+def get_payload(payload):
+    '''Take data payload and return a byte array of the object. Should be
+    structured as a dict/list object. Note this method is slightly expensive
+    because it encodes a dictionary as a JSON string in order to get the bytes
+
+    We also set the separators to exclude spaces in the interest of saving
+     data due to spaces being unnecessary. This is a primitive way to convert
+    data into bytes and you can load it.
+
+    Args:
+        payload(obj): A JSON serializable object representing the payload data
+
+    Returns:
+        bytes: The object as a utf-8 encoded string
+    '''
+    data = json.dumps(payload, separators=[':', ',']).encode('utf-8')
+    return data
+
+
+def decode_payload(payload):
+    '''Takes a byte array and converts it into an object using ``json.loads``
+
+    Args:
+        payload (bytearray): An array of bytes to decode and convert into an object.
+
+    Returns:
+        dict/list: A dictionary or list object depending on the JSON that was encoded
+    '''
+
+    data = json.loads(payload.decode('utf-8'), separator=([':', ',']))
+    return data
+
+
+def build_meta_packet(seq_num, seq_total, tag):
+    '''Create a bytearray which returns a sequence of bytes based on the metadata
+
+    Args:
+        seq_num(int): The packet's sequence number
+        seq_total(int): The total number of sequence packets to be sent
+        tag (bytes): A string or bytes object to encode as the data tag
+
+    Returns:
+        bytearray: A bytearray with the metadata
+    '''
+    if isinstance(seq_total, int) is False or isinstance(seq_num, int) is False:
+        raise TypeError("Sequence number and total must be integer")
+    packet = bytearray()
+    packet += struct.pack('H', seq_total)
+    packet += struct.pack('H', seq_num)
+    packet += tag[0:4]
+    return packet
+
+def recv_n_bytes(conn, num):
+    '''Get a set number of bytes from a TCP connection
+
+    Args:
+        conn (socket): A connected TCP socket
+        num (int): Number of bytes to read
+
+    Returns:
+        bytes: a bytes object containing the data read. None if num < 0
+    '''
+    if num < 0:
+        raise ValueError("conn {} request {} bytes. Bytes must be > 0".format(conn, num))
+    bytes_left = num
+    msg_b = b''
+    while len(msg_b) < num:
+        try:
+            bts = conn.recv(bytes_left)
+            if len(bts) == 0:
+                return None
+                # break  # Empty str means closed socket
+            msg_b += bts
+            bytes_left -= len(bts)
+        except socket.timeout as err:
+            # Socket timed out waiting for bytes
+            pass
+        except OSError as err:
+            # Socket timed out - log an error eventually
+            logger.info('recv_n_bytes: %s', str(err))
+            return None
+    return msg_b
